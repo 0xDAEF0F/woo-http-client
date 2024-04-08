@@ -1,5 +1,5 @@
 use crate::constants::PROXY_URL;
-use crate::constants::{WOO_API_BASE_URL, WOO_API_BASE_URL_STAGING};
+use crate::constants::{PROXY_IP, WOO_API_BASE_URL, WOO_API_BASE_URL_STAGING};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use dotenv::dotenv;
@@ -56,8 +56,6 @@ impl Woo {
 
 #[cfg(test)]
 mod tests {
-    use crate::constants::PROXY_IP;
-
     use super::*;
 
     #[tokio::test]
@@ -89,18 +87,30 @@ mod tests {
     async fn get_woo_history() {
         dotenv().ok();
 
-        let woo_api_key = dotenv::var("WOO_API_KEY").expect("WOO_API_KEY not set");
-        let woo_api_secret = dotenv::var("WOO_API_SECRET").expect("WOO_API_SECRET not set");
+        let mut woo_url: Url = Url::parse(WOO_API_BASE_URL).unwrap();
+        woo_url.set_path("v1/client/trades");
 
-        let http_client = reqwest::Client::new();
+        let woo_api_key = dotenv::var("WOO_API_KEY").unwrap();
+        let woo_api_secret = dotenv::var("WOO_API_SECRET").unwrap();
+
+        let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
+
+        let proxy_username = dotenv::var("PROXY_USERNAME").unwrap();
+        let proxy_password = dotenv::var("PROXY_PASSWORD").unwrap();
 
         let timestamp = chrono::Utc::now().timestamp_millis();
 
-        let res = http_client
-            .get(format!("{WOO_API_BASE_URL}v1/client/hist_trades"))
+        let proxy = reqwest::Proxy::all(proxy_url.clone())
+            .unwrap()
+            .basic_auth(&proxy_username, &proxy_password);
+
+        let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
+
+        let request = http_client
+            .post(woo_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("x-api-timestamp", timestamp)
             .header("x-api-key", woo_api_key)
+            .header("x-api-timestamp", timestamp)
             .header(
                 "x-api-signature",
                 Woo::generate_hmac_sha256_signature(
@@ -108,16 +118,11 @@ mod tests {
                     timestamp as u64,
                     woo_api_secret.to_string(),
                 ),
-            )
-            .send()
-            .await
-            .expect("failed request");
+            );
 
-        let status = res.status();
-        println!("{:?}", status);
+        let response = request.send().await.expect("failed to send request");
 
-        let text = res.text().await.expect("failed to get response text");
-        println!("{}", text);
+        println!("{:?}", response.text().await);
     }
 
     #[tokio::test]
@@ -132,8 +137,8 @@ mod tests {
 
         let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
 
-        let proxy_username = dotenv::var("WOO_PROXY_USERNAME").unwrap();
-        let proxy_password = dotenv::var("WOO_PROXY_PASSWORD").unwrap();
+        let proxy_username = dotenv::var("PROXY_USERNAME").unwrap();
+        let proxy_password = dotenv::var("PROXY_PASSWORD").unwrap();
 
         let timestamp = chrono::Utc::now().timestamp_millis();
 
@@ -213,8 +218,8 @@ mod tests {
 
         let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
 
-        let proxy_username = dotenv::var("WOO_PROXY_USERNAME").unwrap();
-        let proxy_password = dotenv::var("WOO_PROXY_PASSWORD").unwrap();
+        let proxy_username = dotenv::var("PROXY_USERNAME").unwrap();
+        let proxy_password = dotenv::var("PROXY_PASSWORD").unwrap();
 
         let proxy = reqwest::Proxy::all(proxy_url.clone())
             .unwrap()
