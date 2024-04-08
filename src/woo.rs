@@ -1,4 +1,4 @@
-use crate::constants::{PROXY_URL, STAGING_PROXY_URL};
+use crate::constants::PROXY_URL;
 use crate::constants::{WOO_API_BASE_URL, WOO_API_BASE_URL_STAGING};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
@@ -56,6 +56,8 @@ impl Woo {
 
 #[cfg(test)]
 mod tests {
+    use crate::constants::PROXY_IP;
+
     use super::*;
 
     #[tokio::test]
@@ -124,7 +126,6 @@ mod tests {
 
         let mut woo_url: Url = Url::parse(WOO_API_BASE_URL_STAGING).unwrap();
         woo_url.set_path("v1/order");
-        woo_url.set_scheme("http").unwrap();
 
         let woo_api_key = dotenv::var("WOO_API_KEY_STAGING").unwrap();
         let woo_api_secret = dotenv::var("WOO_API_SECRET_STAGING").unwrap();
@@ -171,17 +172,9 @@ mod tests {
             )
             .json(&order);
 
-        let req = request.try_clone().unwrap().build().unwrap();
+        let response = request.send().await.expect("failed to send request");
 
-        println!("{:?}", req.body().unwrap());
-
-        // let response = request.send().await; //.expect("failed to send order");
-
-        // dbg!(&response);
-
-        // let text = response.text().await.expect("failed to get response text");
-
-        // println!("{}", text);
+        println!("{:?}", response.text().await);
     }
 
     #[test]
@@ -218,8 +211,7 @@ mod tests {
     async fn test_proxy() {
         dotenv().ok();
 
-        let mut proxy_url: Url = Url::parse(PROXY_URL).unwrap();
-        let _ = proxy_url.set_scheme("http");
+        let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
 
         let proxy_username = dotenv::var("WOO_PROXY_USERNAME").unwrap();
         let proxy_password = dotenv::var("WOO_PROXY_PASSWORD").unwrap();
@@ -231,8 +223,7 @@ mod tests {
         let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
 
         let res = http_client
-            // .get("http://httpbin.org/ip")
-            .get("http://ordiscan.com/")
+            .get("https://httpbin.org/ip")
             .send()
             .await
             .unwrap();
@@ -240,49 +231,12 @@ mod tests {
         let status = res.status();
         assert_eq!(status.as_u16(), 200);
 
-        // #[derive(Deserialize)]
-        // struct Ip {
-        //     origin: String,
-        // }
-
-        // let ip: Ip = res.json().await.unwrap();
-        // assert_eq!(ip.origin, proxy_url.host_str().unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_proxy_2() {
-        dotenv().ok();
-
-        let proxy_url: Url = Url::parse("https://brd.superproxy.io:22225").unwrap();
-
-        let proxy_username = "brd-customer-hl_3f52b9d5-zone-woo_proxy";
-        let proxy_password = "56q9u8jcicdg";
-
-        let proxy = reqwest::Proxy::all(proxy_url.clone())
-            .unwrap()
-            .basic_auth(&proxy_username, &proxy_password);
-
-        let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
-
-        let res = http_client
-            .get("http://httpbin.org/ip")
-            // .get("http://ordiscan.com/")
-            .send()
-            .await
-            .unwrap();
-
-        println!("{:?}", res);
-
-        let status = res.status();
-        assert_eq!(status.as_u16(), 200);
-
-        #[derive(Deserialize, Debug)]
+        #[derive(Deserialize)]
         struct Ip {
             origin: String,
         }
 
         let ip: Ip = res.json().await.unwrap();
-        println!("{:?}", ip);
-        // assert_eq!(ip.origin, proxy_url.host_str().unwrap());
+        assert_eq!(ip.origin, PROXY_IP);
     }
 }
