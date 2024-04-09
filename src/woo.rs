@@ -110,7 +110,7 @@ mod tests {
         let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
 
         let request = http_client
-            .get(woo_url)
+            .get(woo_url.clone())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("x-api-key", woo_api_key)
             .header("x-api-timestamp", timestamp)
@@ -171,7 +171,7 @@ mod tests {
         let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
 
         let request = http_client
-            .post(woo_url)
+            .post(woo_url.clone())
             .header("x-api-key", woo_api_key)
             .header("x-api-timestamp", timestamp)
             .header(
@@ -232,8 +232,8 @@ mod tests {
         let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
 
         let request = http_client
-            .post(woo_url)
-            .header("x-api-key", woo_api_key)
+            .post(woo_url.clone())
+            .header("x-api-key", woo_api_key.clone())
             .header("x-api-timestamp", timestamp)
             .header(
                 "x-api-signature",
@@ -247,7 +247,57 @@ mod tests {
 
         let response = request.send().await.expect("failed to send request");
 
-        assert_eq!(response.status().as_u16(), 200);
+        #[derive(Deserialize)]
+        struct SendOrderRes {
+            success: bool,
+            timestamp: String,
+            order_id: u32,
+            order_type: String,
+            client_order_id: u32,
+            order_price: Option<f64>,
+            order_quantity: Option<f64>,
+            order_amount: Option<f64>,
+            reduce_only: Option<bool>,
+        }
+
+        let send_order_res: SendOrderRes = response.json().await.expect("failed to parse json");
+
+        assert!(send_order_res.success);
+
+        #[derive(Serialize)]
+        struct CancelOrder {
+            order_id: u32,
+            symbol: String,
+        }
+
+        let cancel_order = CancelOrder {
+            order_id: send_order_res.order_id,
+            symbol: "SPOT_ULP_USDT".to_string(),
+        };
+
+        // this part is to handle the alphabetical order of the query string
+        // `url_encoded` is just an intermediate step
+        let url_encoded =
+            serde_qs::to_string(&cancel_order).expect("failed to serialize to query string");
+        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded).unwrap();
+
+        let request = http_client
+            .delete(woo_url)
+            .header("x-api-key", woo_api_key)
+            .header("x-api-timestamp", timestamp)
+            .header(
+                "x-api-signature",
+                Woo::generate_hmac_sha256_signature(
+                    Woo::generate_sorted_query_string(&cancel_order),
+                    timestamp as u64,
+                    woo_api_secret.to_string(),
+                ),
+            )
+            .form(&deserialized);
+
+        let response = request.send().await.expect("failed to send request");
+
+        println!("{:?}", response.text().await);
     }
 
     #[test]
