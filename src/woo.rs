@@ -1,33 +1,124 @@
 use crate::constants::{PROXY_IP, PROXY_URL, WOO_API_BASE_URL, WOO_API_BASE_URL_STAGING};
+use crate::woo_data_structs::{CancelOrder, CancelOrderRes, SendOrderRes, WooOrder};
+use anyhow::Ok;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use dotenv::dotenv;
 use hmac::{Hmac, Mac};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{self, HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use url::Url;
 
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Serialize, Deserialize)]
-struct WooOrder {
-    symbol: String,
-    client_order_id: Option<u32>,
-    order_tag: Option<String>,
-    order_type: String,
-    order_price: Option<f64>,
-    order_quantity: Option<f64>,
-    order_amount: Option<f64>,
-    reduce_only: Option<bool>,
-    visible_quantity: Option<f64>,
-    side: String,
-    position_side: Option<String>,
+enum Environment {
+    Production,
+    Staging,
 }
 
-struct Woo;
+struct Woo {
+    http_client: reqwest::Client,
+    base_url: Url,
+    api_secret: String,
+}
 
 impl Woo {
+    fn new(environment: Environment) -> Self {
+        dotenv().ok();
+
+        let (base_url, api_key, api_secret) = match environment {
+            Environment::Production => (
+                Url::parse(WOO_API_BASE_URL).unwrap(),
+                dotenv::var("WOO_API_KEY").expect("woo api key missing in .env"),
+                dotenv::var("WOO_API_SECRET").expect("woo api secret missing in .env"),
+            ),
+            Environment::Staging => (
+                Url::parse(WOO_API_BASE_URL_STAGING).unwrap(),
+                dotenv::var("WOO_API_KEY_STAGING").expect("woo api staging key missing in .env"),
+                dotenv::var("WOO_API_SECRET_STAGING")
+                    .expect("woo api staging secret missing in .env"),
+            ),
+        };
+
+        let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
+
+        let proxy_username = dotenv::var("PROXY_USERNAME").expect("proxy username missing in .env");
+        let proxy_password = dotenv::var("PROXY_PASSWORD").expect("proxy password missing in .env");
+
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .expect("failed to create proxy")
+            .basic_auth(&proxy_username, &proxy_password);
+
+        let mut default_headers = header::HeaderMap::new();
+        default_headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let http_client = reqwest::Client::builder()
+            .proxy(proxy)
+            .default_headers(default_headers)
+            .build()
+            .unwrap();
+
+        Self {
+            http_client,
+            base_url,
+            api_secret,
+        }
+    }
+
+    async fn create_order(&mut self, order: WooOrder) -> anyhow::Result<SendOrderRes> {
+        self.base_url.set_path("v1/order");
+
+        let timestamp = chrono::Utc::now().timestamp_millis();
+
+        // this part is to handle the alphabetical order of the query string
+        // `url_encoded` is just an intermediate step
+        let url_encoded = serde_qs::to_string(&order)?;
+        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded)?;
+
+        let req_builder = self
+            .http_client
+            .post(self.base_url.clone())
+            .header("x-api-timestamp", timestamp)
+            .header(
+                "x-api-signature",
+                Woo::generate_hmac_sha256_signature(
+                    Woo::generate_sorted_query_string(&order),
+                    timestamp as u64,
+                    self.api_secret.clone(),
+                ),
+            )
+            .form(&deserialized);
+
+        Ok(req_builder.send().await?.json().await?)
+    }
+
+    async fn cancel_order(&mut self, cancel_order: CancelOrder) -> anyhow::Result<CancelOrderRes> {
+        self.base_url.set_path("v1/order");
+
+        let timestamp = chrono::Utc::now().timestamp_millis();
+
+        // this part is to handle the alphabetical order of the query string
+        // `url_encoded` is just an intermediate step
+        let url_encoded = serde_qs::to_string(&cancel_order)?;
+        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded)?;
+
+        let req_builder = self
+            .http_client
+            .delete(self.base_url.clone())
+            .header("x-api-timestamp", timestamp)
+            .header(
+                "x-api-signature",
+                Woo::generate_hmac_sha256_signature(
+                    Woo::generate_sorted_query_string(&cancel_order),
+                    timestamp as u64,
+                    self.api_secret.clone(),
+                ),
+            )
+            .form(&deserialized);
+
+        Ok(req_builder.send().await?.json().await?)
+    }
+
     fn generate_sorted_query_string<P>(body: P) -> String
     where
         P: Serialize,
@@ -38,9 +129,7 @@ impl Woo {
         let mut sorted_query_string = unsorted_query_string.split('&').collect::<Vec<&str>>();
         sorted_query_string.sort();
 
-        let a = sorted_query_string.join("&");
-        // println!("{:?}", a);
-        a
+        sorted_query_string.join("&")
     }
 
     fn generate_hmac_sha256_signature(
@@ -63,7 +152,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_woo_system_status() {
-        let url = format!("{}v1/public/system_info", WOO_API_BASE_URL);
+        let mut url = Url::parse(WOO_API_BASE_URL).unwrap();
+        url.set_path("v1/public/system_info");
+
         let body = reqwest::get(url).await.expect("failed request");
 
         let status = body.status();
@@ -125,25 +216,14 @@ mod tests {
 
         let response = request.send().await.expect("failed to send request");
 
-        println!("{:?}", response.text().await);
+        let status = response.status();
+
+        assert_eq!(status.as_u16(), 200);
     }
 
     #[tokio::test]
     async fn send_order() {
-        dotenv().ok();
-
-        let mut woo_url: Url = Url::parse(WOO_API_BASE_URL_STAGING).unwrap();
-        woo_url.set_path("v1/order");
-
-        let woo_api_key = dotenv::var("WOO_API_KEY_STAGING").unwrap();
-        let woo_api_secret = dotenv::var("WOO_API_SECRET_STAGING").unwrap();
-
-        let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
-
-        let proxy_username = dotenv::var("PROXY_USERNAME").unwrap();
-        let proxy_password = dotenv::var("PROXY_PASSWORD").unwrap();
-
-        let timestamp = chrono::Utc::now().timestamp_millis();
+        let mut woo = Woo::new(super::Environment::Staging);
 
         let order = WooOrder {
             order_price: Some(1.0),
@@ -159,52 +239,14 @@ mod tests {
             position_side: None,
         };
 
-        // this part is to handle the alphabetical order of the query string
-        // `url_encoded` is just an intermediate step
-        let url_encoded = serde_qs::to_string(&order).expect("failed to serialize to query string");
-        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded).unwrap();
+        let order_created = woo.create_order(order).await.unwrap();
 
-        let proxy = reqwest::Proxy::all(proxy_url.clone())
-            .unwrap()
-            .basic_auth(&proxy_username, &proxy_password);
-
-        let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
-
-        let request = http_client
-            .post(woo_url.clone())
-            .header("x-api-key", woo_api_key)
-            .header("x-api-timestamp", timestamp)
-            .header(
-                "x-api-signature",
-                Woo::generate_hmac_sha256_signature(
-                    Woo::generate_sorted_query_string(&order),
-                    timestamp as u64,
-                    woo_api_secret.to_string(),
-                ),
-            )
-            .form(&deserialized);
-
-        let response = request.send().await.expect("failed to send request");
-
-        assert_eq!(response.status().as_u16(), 200);
+        assert!(order_created.success);
     }
 
     #[tokio::test]
     async fn cancel_order() {
-        dotenv().ok();
-
-        let mut woo_url: Url = Url::parse(WOO_API_BASE_URL_STAGING).unwrap();
-        woo_url.set_path("v1/order");
-
-        let woo_api_key = dotenv::var("WOO_API_KEY_STAGING").unwrap();
-        let woo_api_secret = dotenv::var("WOO_API_SECRET_STAGING").unwrap();
-
-        let proxy_url: Url = Url::parse(PROXY_URL).unwrap();
-
-        let proxy_username = dotenv::var("PROXY_USERNAME").unwrap();
-        let proxy_password = dotenv::var("PROXY_PASSWORD").unwrap();
-
-        let timestamp = chrono::Utc::now().timestamp_millis();
+        let mut woo = Woo::new(super::Environment::Staging);
 
         let order = WooOrder {
             order_price: Some(1.0),
@@ -220,84 +262,18 @@ mod tests {
             position_side: None,
         };
 
-        // this part is to handle the alphabetical order of the query string
-        // `url_encoded` is just an intermediate step
-        let url_encoded = serde_qs::to_string(&order).expect("failed to serialize to query string");
-        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded).unwrap();
+        let order_created = woo.create_order(order).await.unwrap();
 
-        let proxy = reqwest::Proxy::all(proxy_url.clone())
-            .unwrap()
-            .basic_auth(&proxy_username, &proxy_password);
-
-        let http_client = reqwest::Client::builder().proxy(proxy).build().unwrap();
-
-        let request = http_client
-            .post(woo_url.clone())
-            .header("x-api-key", woo_api_key.clone())
-            .header("x-api-timestamp", timestamp)
-            .header(
-                "x-api-signature",
-                Woo::generate_hmac_sha256_signature(
-                    Woo::generate_sorted_query_string(&order),
-                    timestamp as u64,
-                    woo_api_secret.to_string(),
-                ),
-            )
-            .form(&deserialized);
-
-        let response = request.send().await.expect("failed to send request");
-
-        #[derive(Deserialize)]
-        struct SendOrderRes {
-            success: bool,
-            timestamp: String,
-            order_id: u32,
-            order_type: String,
-            client_order_id: u32,
-            order_price: Option<f64>,
-            order_quantity: Option<f64>,
-            order_amount: Option<f64>,
-            reduce_only: Option<bool>,
-        }
-
-        let send_order_res: SendOrderRes = response.json().await.expect("failed to parse json");
-
-        assert!(send_order_res.success);
-
-        #[derive(Serialize)]
-        struct CancelOrder {
-            order_id: u32,
-            symbol: String,
-        }
+        assert!(order_created.success);
 
         let cancel_order = CancelOrder {
-            order_id: send_order_res.order_id,
+            order_id: order_created.order_id,
             symbol: "SPOT_ULP_USDT".to_string(),
         };
 
-        // this part is to handle the alphabetical order of the query string
-        // `url_encoded` is just an intermediate step
-        let url_encoded =
-            serde_qs::to_string(&cancel_order).expect("failed to serialize to query string");
-        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded).unwrap();
+        let order_cancelled = woo.cancel_order(cancel_order).await.unwrap();
 
-        let request = http_client
-            .delete(woo_url)
-            .header("x-api-key", woo_api_key)
-            .header("x-api-timestamp", timestamp)
-            .header(
-                "x-api-signature",
-                Woo::generate_hmac_sha256_signature(
-                    Woo::generate_sorted_query_string(&cancel_order),
-                    timestamp as u64,
-                    woo_api_secret.to_string(),
-                ),
-            )
-            .form(&deserialized);
-
-        let response = request.send().await.expect("failed to send request");
-
-        println!("{:?}", response.text().await);
+        assert!(order_cancelled.success);
     }
 
     #[test]
