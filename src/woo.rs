@@ -1,5 +1,7 @@
 use crate::constants::{PROXY_IP, PROXY_URL, WOO_API_BASE_URL, WOO_API_BASE_URL_STAGING};
-use crate::woo_data_structs::{CancelOrder, CancelOrderRes, SendOrderRes, WooOrder};
+use crate::woo_data_structs::{
+    CancelOrder, CancelOrderRes, GetOrder, GetOrderRes, SendOrderRes, WooOrder,
+};
 use anyhow::Ok;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
@@ -8,6 +10,7 @@ use hmac::{Hmac, Mac};
 use reqwest::header::{self, HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use url::Url;
 
@@ -115,6 +118,43 @@ impl Woo {
                 ),
             )
             .form(&deserialized);
+
+        Ok(req_builder.send().await?.json().await?)
+    }
+
+    async fn get_orders(&mut self, get_order: GetOrder) -> anyhow::Result<GetOrderRes> {
+        self.base_url.set_path("v1/orders");
+
+        let timestamp = chrono::Utc::now().timestamp_millis();
+
+        let sorted_qs = Woo::generate_sorted_query_string(&get_order);
+
+        // this part is to handle the alphabetical order of the query string
+        // `url_encoded` is just an intermediate step
+        let url_encoded = serde_qs::to_string(&get_order)?;
+        let deserialized: BTreeMap<String, String> = serde_qs::from_str(&url_encoded)?;
+
+        let req_builder = self
+            .http_client
+            .get(self.base_url.clone())
+            .header("x-api-timestamp", timestamp)
+            .header(
+                "x-api-signature",
+                Woo::generate_hmac_sha256_signature(
+                    sorted_qs,
+                    timestamp as u64,
+                    self.api_secret.clone(),
+                ),
+            )
+            .query(&deserialized);
+
+        // let intermediate = req_builder.send().await?;
+
+        // let text = intermediate.text().await?;
+
+        // dbg!(&text);
+
+        // Ok(())
 
         Ok(req_builder.send().await?.json().await?)
     }
@@ -274,6 +314,26 @@ mod tests {
         let order_cancelled = woo.cancel_order(cancel_order).await.unwrap();
 
         assert!(order_cancelled.success);
+    }
+
+    #[tokio::test]
+    async fn get_orders() {
+        let mut woo = Woo::new(super::Environment::Staging);
+
+        let order = GetOrder {
+            end_t: None,
+            order_tag: None,
+            order_type: None,
+            page: None,
+            realized_pnl: None,
+            side: None,
+            size: None,
+            start_t: None,
+            status: None,
+            symbol: None,
+        };
+
+        let _orders = woo.get_orders(order).await.expect("failed to get orders");
     }
 
     #[test]
